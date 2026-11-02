@@ -1,1 +1,70 @@
+# Genera el mapa de pluja i bolets cada matí i el publica a GitHub Pages.
+name: Mapa de pluja diari
 
+on:
+  schedule:
+    # hora UTC: 06:15 UTC = 7:15 a l'hivern i 8:15 a l'estiu (hora de Catalunya).
+    # GitHub pot endarrerir uns minuts les execucions programades.
+    - cron: "15 6 * * *"
+  workflow_dispatch:   # botó "Run workflow" per executar-lo a mà
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  genera:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: r-lib/actions/setup-pandoc@v2
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true   # paquets ja compilats: instal·lació ràpida
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: |
+            any::httr2
+            any::jsonlite
+            any::dplyr
+            any::leaflet
+            any::htmlwidgets
+            any::sf
+            any::terra
+            any::gstat
+            any::mapSpain
+            any::geodata
+
+      # el model del terreny es descarrega una vegada i es reaprofita
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/R/pluja_xema
+          key: mdt-v1
+
+      - name: Genera el mapa
+        env:
+          SORTIDA_HTML: public/index.html
+          SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+        run: Rscript pluja_acumulada_xema.R
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  publica:
+    needs: genera
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

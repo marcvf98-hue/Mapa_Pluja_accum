@@ -80,7 +80,10 @@ LLINDAR_GLACADA_FORTA <- -2  # °C: una sola glaçada així ja frena la fructifi
 DIES_GLACADA_FRENEN   <- 3   # o bé aquest nombre de glaçades febles
 DIES_GLACADA_RECENTS  <- 10  # només compten les glaçades dels darrers N dies
 COBERTURA_MINIMA <- 0.8  # descarta estacions amb menys del 80% de dies amb dada
-APP_TOKEN <- NULL        # opcional: token gratuït del portal per evitar límits
+# opcional: token gratuït del portal per evitar límits (o variable d'entorn SOCRATA_APP_TOKEN)
+APP_TOKEN <- if (nzchar(Sys.getenv("SOCRATA_APP_TOKEN"))) Sys.getenv("SOCRATA_APP_TOKEN") else NULL
+# fitxer de sortida (a GitHub es desa a public/index.html amb la variable SORTIDA_HTML)
+SORTIDA_HTML <- Sys.getenv("SORTIDA_HTML", "pluja_acumulada.html")
 
 soda_get <- function(url, params, timeout = 300) {
   req <- request(url) |>
@@ -142,7 +145,7 @@ pluja_diaria <- function(dies_max) {
               data = as.Date(substr(data_lectura, 1, 10)),
               valor = suppressWarnings(as.numeric(valor))) |>
     distinct(codi_estacio, data, codi_variable, .keep_all = TRUE)  # per si el portal repeteix registres
-  
+
   # comprova què és cada codi (els de temperatura no estan verificats)
   noms <- distinct(brut, codi_variable, nom_variable)
   for (i in seq_len(nrow(noms))) message(sprintf("  variable %s: %s", noms$codi_variable[i], noms$nom_variable[i]))
@@ -154,7 +157,7 @@ pluja_diaria <- function(dies_max) {
     message("  AVÍS: el codi ", VAR_TMITJ_DIARIA, " no és una temperatura; l'índex de bolets fa servir K fixa.")
   if (vol_temp && !tmin_ok)
     message("  AVÍS: el codi ", VAR_TMIN_DIARIA, " no és una temperatura; no es tenen en compte les glaçades.")
-  
+
   treu <- function(codi, valid = TRUE) {
     if (!valid) return(brut[0, c("codi_estacio", "data")] |> mutate(v = numeric()))
     filter(brut, codi_variable == codi) |> select(codi_estacio, data, v = valor)
@@ -294,7 +297,7 @@ ajusta_variograma <- function(formula, d) {
                  cressie = TRUE)
   if (is.null(v) || nrow(v) < 3) stop("massa poques parelles d'estacions per al variograma")
   semivar <- max(v$gamma)
-  
+
   # prova cada model amb valors inicials raonables i es queda amb el millor que
   # convergeixi i tingui un abast creïble (entre 5 km i el doble del cutoff)
   millor <- NULL; millor_sse <- Inf
@@ -312,7 +315,7 @@ ajusta_variograma <- function(formula, d) {
     if (sse < millor_sse) { millor <- fv; millor_sse <- sse }
   }
   if (is.null(millor)) stop("cap variograma no convergeix amb un abast raonable")
-  
+
   n <- nrow(millor)
   message(sprintf("  variograma: %s, abast %.0f km, efecte pepita %.0f%%",
                   as.character(millor$model[n]), millor$range[n] / 1000,
@@ -326,12 +329,12 @@ interpolar <- function(df, metode = INTERPOLACIO, resolucio = RESOLUCIO_M) {
     st_transform(25831)
   d <- data.frame(st_coordinates(pts), pluja = df$pluja)  # columnes X, Y, pluja
   plantilla <- rast(vect(contorn), resolution = resolucio)
-  
+
   # IDW: veïns més propers (12), pes = 1 / distància^2 (també és el pla de rescat)
   model_idw <- gstat(formula = pluja ~ 1, locations = ~X + Y, data = d,
                      nmax = 12, set = list(idp = 2))
   model <- model_idw
-  
+
   if (metode == "ked") {
     model <- tryCatch({
       dem <- model_terreny(plantilla, contorn)
@@ -339,14 +342,14 @@ interpolar <- function(df, metode = INTERPOLACIO, resolucio = RESOLUCIO_M) {
       # si cau fora (estació a la vora), es fa servir l'altitud de les metadades
       d$alt <- terra::extract(dem, vect(pts), method = "bilinear")[["alt"]]
       d$alt <- ifelse(is.na(d$alt), df$altitud, d$alt)
-      
+
       ajust <- lm(pluja ~ alt, data = d)
       r2 <- summary(ajust)$r.squared
       message(sprintf("  relació pluja-altitud: %+.1f mm per cada 100 m, R² = %.2f",
                       100 * coef(ajust)[["alt"]], r2))
       # si l'altitud no explica gairebé res, només afegeix soroll: kriging ordinari
       if (r2 < R2_MINIM_KED) stop(sprintf("R² < %.2f, l'altitud no aporta", R2_MINIM_KED))
-      
+
       fv <- ajusta_variograma(pluja ~ alt, d)  # variograma dels residus
       plantilla <- dem                          # la graella porta l'altitud com a capa "alt"
       gstat(formula = pluja ~ alt, locations = ~X + Y, data = d, model = fv, nmax = 30)
@@ -356,7 +359,7 @@ interpolar <- function(df, metode = INTERPOLACIO, resolucio = RESOLUCIO_M) {
       NULL
     })
   }
-  
+
   if (metode == "kriging") {
     model <- tryCatch({
       fv <- ajusta_variograma(pluja ~ 1, d)
@@ -366,11 +369,11 @@ interpolar <- function(df, metode = INTERPOLACIO, resolucio = RESOLUCIO_M) {
       model_idw
     })
   }
-  
+
   if (is.null(model)) model <- model_idw
   # amb KED, les cel·les sense altitud (fora de Catalunya) se salten
   r <- terra::interpolate(plantilla, model, debug.level = 0, xyNames = c("X", "Y"),
-                          na.rm = (metode == "ked"))[[1]]
+                   na.rm = (metode == "ked"))[[1]]
   r <- terra::mask(r, vect(contorn))
   terra::clamp(r, lower = 0, values = TRUE)  # el kriging pot donar valors negatius
 }
@@ -394,7 +397,7 @@ index_bolets <- function(codis, finestra = BOLETS_DIES) {
   d  <- dades_pluja(codis)
   fi <- .cache$data_fi
   dies <- seq(fi - dies_necessaris() + 1, fi, by = "day")   # tot el període: l'API "s'escalfa"
-  
+
   graella <- expand.grid(codi_estacio = unique(d$codi_estacio), data = dies,
                          stringsAsFactors = FALSE)
   graella |>
@@ -403,9 +406,9 @@ index_bolets <- function(codis, finestra = BOLETS_DIES) {
     group_by(codi_estacio) |>
     mutate(efectiva = pmin(coalesce(pluja, 0), PLUJA_EFECTIVA_MAX),
            k_dia = if (BOLETS_TEMPERATURA)
-             coalesce(pmin(BOLETS_K_MAX, pmax(BOLETS_K_MIN,
-                                              BOLETS_K - BOLETS_K_PENDENT * (tmitj - BOLETS_T_REF))), BOLETS_K)
-           else rep(BOLETS_K, n()),
+                     coalesce(pmin(BOLETS_K_MAX, pmax(BOLETS_K_MIN,
+                       BOLETS_K - BOLETS_K_PENDENT * (tmitj - BOLETS_T_REF))), BOLETS_K)
+                   else rep(BOLETS_K, n()),
            api = calcula_api(efectiva, k_dia)) |>
     filter(data > fi - finestra) |>
     summarise(
@@ -418,7 +421,7 @@ index_bolets <- function(codis, finestra = BOLETS_DIES) {
       k_mitjana   = mean(k_dia),
       dies_temp   = sum(!is.na(tmitj)),
       tmin_abs    = { tr <- tmin[data > fi - DIES_GLACADA_RECENTS]
-      if (any(!is.na(tr))) min(tr, na.rm = TRUE) else NA_real_ },
+                      if (any(!is.na(tr))) min(tr, na.rm = TRUE) else NA_real_ },
       glacades    = sum(tmin[data > fi - DIES_GLACADA_RECENTS] <= LLINDAR_GLACADA, na.rm = TRUE),
       glacada_forta = any(tmin[data > fi - DIES_GLACADA_RECENTS] <= LLINDAR_GLACADA_FORTA, na.rm = TRUE),
       total       = round(sum(pluja, na.rm = TRUE), 1),
@@ -445,10 +448,10 @@ afegeix_capa_bolets <- function(mapa, est, grups) {
   if (nrow(df) == 0) { message("Sense dades per a l'índex de bolets"); return(list(mapa = mapa, grups = grups)) }
   message(sprintf("%s: %d estacions; %d molt favorables, %d favorables", nom, nrow(df),
                   sum(df$valoracio == "Molt favorable"), sum(startsWith(df$valoracio, "Favorable"))))
-  
+
   pal <- colorNumeric(c("#8c510a", "#d8b365", "#f6e8c3", "#c7eae5", "#5ab4ac", "#01665e"),
                       domain = c(0, BOLETS_DIES * 1.01), na.color = "transparent")
-  
+
   if (INTERPOLACIO != "cap" && nrow(df) >= MIN_ESTACIONS_INTERPOLAR) {
     message("  interpolant l'índex (idw)...")
     r <- interpolar(mutate(df, pluja = dies_humits), metode = "idw")
@@ -456,7 +459,7 @@ afegeix_capa_bolets <- function(mapa, est, grups) {
     mapa <- addRasterImage(mapa, r, colors = pal, opacity = OPACITAT_PLUJA, group = nom,
                            options = gridOptions(pane = "pluja"))
   }
-  
+
   mapa <- mapa |>
     addCircleMarkers(
       data = df, lng = ~longitud, lat = ~latitud, group = nom,
@@ -490,7 +493,7 @@ afegeix_capa_bolets <- function(mapa, est, grups) {
                 "border:2.5px solid %s;vertical-align:middle'></span> ",
                 "<span style='font-weight:normal'>frenat per glaçades</span>"),
                 BOLETS_DIES, COLOR_GLACADA))
-  
+
   list(mapa = mapa, grups = c(grups, nom))
 }
 
@@ -538,26 +541,26 @@ afegeix_ombres <- function(mapa) {
 main <- function() {
   .cache$pluja <- NULL; .cache$data_fi <- NULL  # dades noves a cada execució (el MDT es manté)
   est <- obtenir_estacions()
-  
+
   mapa <- leaflet() |>
     afegeix_fons() |>
     setView(lng = 1.7, lat = 41.7, zoom = 8)
-  
+
   colors <- c("#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b", "#7a0177")
   grups <- character(0)
-  
+
   for (nom in names(PERIODES)) {
     dies <- PERIODES[[nom]]
     df <- pluja_acumulada(dies, est$codi_estacio) |> inner_join(est, by = "codi_estacio")
     if (nrow(df) == 0) { message("Sense dades per a ", nom); next }
     message(sprintf("%s: %d estacions, màx %.1f mm (%s)", nom, nrow(df),
                     max(df$pluja), df$nom_estacio[which.max(df$pluja)]))
-    
+
     vmax_color <- max(quantile(df$pluja, 0.98), 1)
     # domini una mica més ample: el reprojectat del ràster pot sortir-se'n per decimals
     pal <- colorNumeric(colors, domain = c(0, vmax_color * 1.01), na.color = "transparent")
     vmax <- max(max(df$pluja), 1)
-    
+
     if (INTERPOLACIO != "cap" && nrow(df) < MIN_ESTACIONS_INTERPOLAR) {
       message("  només ", nrow(df), " estacions: no s'interpola, només es mostren els punts.")
       df$radi <- 4 + 10 * sqrt(df$pluja / vmax)
@@ -570,7 +573,7 @@ main <- function() {
     } else {
       df$radi <- 4 + 10 * sqrt(df$pluja / vmax)       # sense, mida segons la pluja
     }
-    
+
     mapa <- mapa |>
       addCircleMarkers(
         data = df, lng = ~longitud, lat = ~latitud, group = nom,
@@ -586,12 +589,12 @@ main <- function() {
                 title = paste0("Pluja (mm)<br>", tolower(nom)))
     grups <- c(grups, nom)
   }
-  
+
   if (BOLETS) {
     res <- afegeix_capa_bolets(mapa, est, grups)
     mapa <- res$mapa; grups <- res$grups
   }
-  
+
   titol <- sprintf("<b>Pluja acumulada – XEMA (Meteocat)</b><br>Fins al %s (inclòs)",
                    format(.cache$data_fi, "%d/%m/%Y"))
   mapa <- mapa |>
@@ -600,7 +603,7 @@ main <- function() {
                      overlayGroups = if (OMBRES) "Relleu (ombrejat ICGC)",
                      options = layersControlOptions(collapsed = FALSE)) |>
     addControl(titol, position = "topleft")
-  
+
   # mostra només la llegenda del període seleccionat
   mapa <- onRender(mapa, sprintf("
     function(el, x) {
@@ -616,15 +619,23 @@ main <- function() {
       var map = (typeof this.on === 'function') ? this : this.getMap();
       map.on('baselayerchange', function(e) { mostra(e.name); });
     }", toJSON(grups)))
-  
+
+  # es desa a la carpeta actual i després es copia: saveWidget autònom és més
+  # fiable així que no pas escrivint directament en una subcarpeta
   tryCatch(
-    saveWidget(mapa, "pluja_acumulada.html", selfcontained = TRUE),
+    saveWidget(mapa, "pluja_acumulada.html", selfcontained = TRUE,
+               title = "Pluja acumulada i bolets – XEMA"),
     error = function(e) {
       message("No s'ha pogut fer un HTML autònom (", conditionMessage(e),
               "); el deso amb la carpeta pluja_acumulada_files al costat.")
       saveWidget(mapa, "pluja_acumulada.html", selfcontained = FALSE)
     })
-  message("Mapa desat a pluja_acumulada.html")
+  if (normalizePath(SORTIDA_HTML, mustWork = FALSE) !=
+      normalizePath("pluja_acumulada.html", mustWork = FALSE)) {
+    dir.create(dirname(SORTIDA_HTML), recursive = TRUE, showWarnings = FALSE)
+    file.copy("pluja_acumulada.html", SORTIDA_HTML, overwrite = TRUE)
+  }
+  message("Mapa desat a ", SORTIDA_HTML)
   invisible(mapa)
 }
 
